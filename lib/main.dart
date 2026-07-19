@@ -14,6 +14,7 @@ import 'energy_counter.dart';
 import 'foreground_task.dart';
 import 'history/history_screen.dart';
 import 'history/history_store.dart';
+import 'jbd/jbd_bms_scanner.dart';
 import 'setup/setup_screen.dart';
 import 'victron/victron_scanner.dart';
 import 'web/web_server.dart';
@@ -30,7 +31,7 @@ class VagnkollApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Vagnkoll',
+      title: 'Vagnkoll JBD',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -65,7 +66,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  final _scanner = VictronScanner();
+  final _scanner = JbdBmsScanner();
   final _history = HistoryStore();
   final _energy = EnergyCounter();
   final _appliances = ApplianceStore();
@@ -95,10 +96,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Starta om BLE-scanning för säkerhets skull
-      _restartScanner();
-    }
+    if (state == AppLifecycleState.resumed) _restartScanner();
   }
 
   Future<void> _restartScanner() async {
@@ -120,7 +118,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
-    // Ladda konfiguration. Vid första start utan config: visa onboarding.
     var cfg = await AppConfig.load();
     final onboardingDone = await AppConfig.isOnboardingDone();
     if (!cfg.isConfigured && !onboardingDone && mounted) {
@@ -130,7 +127,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           fullscreenDialog: true,
         ),
       );
-      cfg = await AppConfig.load(); // ladda om efter onboarding
+      cfg = await AppConfig.load();
     }
     _config = cfg;
     await _scanner.updateDevices(_config.devices);
@@ -166,9 +163,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _classifier.setLibrary(await _appliances.all());
     });
     await _scanner.start();
-    setState(() => _status = 'Söker efter Victron…');
+    setState(() => _status = 'Ansluter till JBD BMS…');
 
-    // Starta webbservern (lokalt WiFi)
     _webServer = WebServer(
       scanner: _scanner,
       energy: _energy,
@@ -178,10 +174,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await _webServer!.start();
     _webServer!.updateConfig(_config);
 
-    // Starta foreground service så Android håller appen vid liv
-    // även när skärmen är låst
     await VagnkollForegroundService.start();
-    // Tickar var sekund för att uppdatera telemetri-indikatorn
     _telemetryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
@@ -208,25 +201,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  /// Returnerar telemetri-status: 0 = färsk (grön), 1 = stale (gul), 2 = död (röd)
   int _telemetryStatus() {
-    final t = _state?.shuntUpdated ?? _state?.solarUpdated;
+    final t = _state?.shuntUpdated;
     if (t == null) return 2;
     final age = DateTime.now().difference(t).inSeconds;
-    if (age <= 3) return 0;
-    if (age <= 10) return 1;
+    if (age <= 5) return 0;
+    if (age <= 15) return 1;
     return 2;
   }
 
-  /// True om respektive enhet har skickat data senaste 5 sek
   bool _shuntFresh() {
     final t = _state?.shuntUpdated;
-    if (t == null) return false;
-    return DateTime.now().difference(t).inSeconds <= 5;
-  }
-
-  bool _solarFresh() {
-    final t = _state?.solarUpdated;
     if (t == null) return false;
     return DateTime.now().difference(t).inSeconds <= 5;
   }
@@ -234,8 +219,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final shunt = _state?.shunt;
-    final solar = _state?.solar;
-    final hasData = shunt != null || solar != null;
+    final hasData = shunt != null;
 
     return Scaffold(
       body: SafeArea(
@@ -251,7 +235,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     children: [
                       _telemetryDot(),
                       const SizedBox(width: 8),
-                      const Text('VAGNKOLL',
+                      const Text('VAGNKOLL JBD',
                           style: TextStyle(
                             letterSpacing: 4,
                             fontSize: 14,
@@ -263,9 +247,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     children: [
                       Text('v${_shortBuildId()}',
                           style: const TextStyle(
-                            fontSize: 11,
-                            color: Color(0xFF4B5563),
-                          )),
+                              fontSize: 11, color: Color(0xFF4B5563))),
                       const SizedBox(width: 8),
                       IconButton(
                         icon: const Icon(Icons.electrical_services, size: 22),
@@ -295,9 +277,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ],
               ),
               const SizedBox(height: 12),
-              Expanded(
-                child: !hasData ? _waitingView() : _liveView(shunt, solar),
-              ),
+              Expanded(child: !hasData ? _waitingView() : _liveView(shunt)),
             ],
           ),
         ),
@@ -311,8 +291,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     ));
   }
 
-  // Kortform av BUILD_ID — bara HHMM-delen. Honor 9 är för smal för full sträng
-  // tillsammans med tre ikoner. Full BUILD_ID går att se via setup-skärmen.
   String _shortBuildId() {
     final dash = kBuildId.indexOf('-');
     return dash > 0 ? kBuildId.substring(0, dash) : kBuildId;
@@ -372,13 +350,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _resumeTelemetryTimer() {
     _telemetryTimer?.cancel();
-    _telemetryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _telemetryTimer =
+        Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
   }
 
   Widget _waitingView() {
-    // Inga enheter konfigurerade → visa tydlig call-to-action istället för spinnare
     if (_config.devices.isEmpty) {
       return Center(
         child: Column(
@@ -387,7 +365,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             const Icon(Icons.bluetooth_disabled,
                 size: 56, color: Color(0xFF4B5563)),
             const SizedBox(height: 20),
-            const Text('Inga Victron-enheter konfigurerade',
+            const Text('Inget JBD BMS konfigurerat',
                 style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 15)),
             const SizedBox(height: 24),
             ElevatedButton.icon(
@@ -418,25 +396,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _liveView(shunt, solar) {
-    // Räkna momentana värden
-    final voltage = shunt?.batteryVoltage ?? solar?.batteryVoltage;
-    final solarA = (solar != null && voltage != null && voltage > 0)
-        ? (solar.pvPower / voltage)
-        : null;
-    final loadA = (solarA != null && shunt?.current != null)
-        ? (solarA - shunt!.current).clamp(0.0, double.infinity)
-        : null;
-    final loadW = (loadA != null && voltage != null) ? loadA * voltage : null;
+  Widget _liveView(shunt) {
+    final voltage = shunt?.batteryVoltage as double?;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _BigStat(
           label: 'BATTERI',
-          labelColor: _shuntFresh() ? const Color(0xFF4ADE80) : const Color(0xFF6B7280),
+          labelColor: _shuntFresh()
+              ? const Color(0xFF4ADE80)
+              : const Color(0xFF6B7280),
           value: shunt?.soc.toStringAsFixed(1) ?? '—',
           unit: '%',
-          color: _socColor(shunt?.soc),
+          color: _socColor(shunt?.soc as double?),
           rightLines: shunt == null
               ? null
               : [
@@ -450,37 +422,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           children: [
             Expanded(
               child: _SmallStat(
-                label: 'Sol',
-                labelColor: _solarFresh() ? const Color(0xFF4ADE80) : const Color(0xFF6B7280),
-                value: solarA != null && solar != null
-                    ? '${solarA.toStringAsFixed(1)}A/${solar.pvPower.toStringAsFixed(0)}W'
-                    : '—',
-                unit: '',
-                color: const Color(0xFFFBBF24),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _SmallStat(
                 label: 'Laddat idag',
                 value: _energy.solarAhToday.toStringAsFixed(1),
                 unit: 'Ah',
                 color: const Color(0xFF4ADE80),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: _SmallStat(
-                label: 'Förbrukning',
-                value: loadA != null
-                    ? '${loadA.toStringAsFixed(1)}A/${loadW?.toStringAsFixed(0) ?? '—'}W'
-                    : '—',
-                unit: '',
-                color: const Color(0xFFEF4444),
               ),
             ),
             const SizedBox(width: 12),
@@ -494,29 +439,53 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ],
         ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _SmallStat(
+                label: 'Förbrukning',
+                value: voltage != null && shunt != null
+                    ? '${shunt.current.abs().toStringAsFixed(1)}A / ${(shunt.current.abs() * voltage).toStringAsFixed(0)}W'
+                    : '—',
+                unit: '',
+                color: const Color(0xFFEF4444),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _SmallStat(
+                label: 'Ah kvar (BMS)',
+                value: shunt?.consumedAh != null
+                    ? (_config.batteryCapacityAh + shunt!.consumedAh!)
+                        .toStringAsFixed(1)
+                    : '—',
+                unit: 'Ah',
+                color: _socColor(shunt?.soc as double?),
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 16),
         ..._activeAlarms.map(_alarmBanner),
-        if (_classification != null && _classification!.activeAppliances.isNotEmpty)
+        if (_classification != null &&
+            _classification!.activeAppliances.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(
               'Aktivt nu: ${_classification!.activeAppliances.map((a) => a.name).join(", ")}',
-              style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
+              style:
+                  const TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
             ),
           ),
         const Spacer(),
-        if (shunt?.timeToGoMinutes != null)
-          Text('Tid kvar: ${_formatMinutes(shunt!.timeToGoMinutes!)}',
-              style: const TextStyle(color: Color(0xFF9CA3AF))),
-        if (solar != null)
-          Text('Laddläge: ${solar.chargeStateName}',
-              style: const TextStyle(color: Color(0xFF9CA3AF))),
         if (_webServer?.ipAddress != null)
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
               'Webb: http://${_webServer!.ipAddress}:${WebServer.port}',
-              style: const TextStyle(color: Color(0xFF6B7280), fontSize: 11),
+              style: const TextStyle(
+                  color: Color(0xFF6B7280), fontSize: 11),
             ),
           ),
       ],
@@ -530,12 +499,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return const Color(0xFF4ADE80);
   }
 
-  String _formatMinutes(int m) {
-    final h = m ~/ 60;
-    final mm = m % 60;
-    return h > 0 ? '${h}h ${mm}m' : '${mm}m';
-  }
-
   Widget _telemetryDot() {
     final status = _telemetryStatus();
     final color = switch (status) {
@@ -543,27 +506,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       1 => const Color(0xFFFBBF24),
       _ => const Color(0xFFEF4444),
     };
-    final label = switch (status) {
-      0 => null,
-      1 => 'Försenat',
-      _ => 'Ingen signal',
-    };
     return Container(
       width: 10,
       height: 10,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-      ),
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 
   Widget _alarmBanner(Alarm a) {
     final c = switch (a.level) {
       AlarmLevel.emergency => const Color(0xFFEF4444),
-      AlarmLevel.critical => const Color(0xFFEF4444),
-      AlarmLevel.warn => const Color(0xFFFBBF24),
-      AlarmLevel.info => const Color(0xFF4ADE80),
+      AlarmLevel.critical  => const Color(0xFFEF4444),
+      AlarmLevel.warn      => const Color(0xFFFBBF24),
+      AlarmLevel.info      => const Color(0xFF4ADE80),
     };
     return Container(
       margin: const EdgeInsets.only(top: 8),
@@ -573,10 +528,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         border: Border.all(color: c, width: 1),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(
-        a.message,
-        style: TextStyle(color: c, fontSize: 13),
-      ),
+      child: Text(a.message, style: TextStyle(color: c, fontSize: 13)),
     );
   }
 }
@@ -606,22 +558,31 @@ class _BigStat extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(color: labelColor ?? const Color(0xFF6B7280), letterSpacing: 2, fontSize: 11)),
+          Text(label,
+              style: TextStyle(
+                  color: labelColor ?? const Color(0xFF6B7280),
+                  letterSpacing: 2,
+                  fontSize: 11)),
           const SizedBox(height: 2),
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // SoC stora siffror till vänster
               Row(
                 crossAxisAlignment: CrossAxisAlignment.baseline,
                 textBaseline: TextBaseline.alphabetic,
                 children: [
-                  Text(value, style: TextStyle(fontSize: 56, fontWeight: FontWeight.w200, color: color, height: 1.0)),
+                  Text(value,
+                      style: TextStyle(
+                          fontSize: 56,
+                          fontWeight: FontWeight.w200,
+                          color: color,
+                          height: 1.0)),
                   const SizedBox(width: 6),
-                  Text(unit, style: TextStyle(fontSize: 22, color: color.withOpacity(0.7))),
+                  Text(unit,
+                      style: TextStyle(
+                          fontSize: 22, color: color.withOpacity(0.7))),
                 ],
               ),
-              // Tre små rader till höger
               if (rightLines != null)
                 Expanded(
                   child: Padding(
@@ -630,14 +591,14 @@ class _BigStat extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       mainAxisSize: MainAxisSize.min,
                       children: rightLines!
-                          .map((line) => Text(
-                                line,
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: color.withOpacity(0.85),
-                                  fontFeatures: const [FontFeature.tabularFigures()],
-                                ),
-                              ))
+                          .map((line) => Text(line,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: color.withOpacity(0.85),
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures()
+                                ],
+                              )))
                           .toList(),
                     ),
                   ),
@@ -654,7 +615,12 @@ class _SmallStat extends StatelessWidget {
   final String label, value, unit;
   final Color? color;
   final Color? labelColor;
-  const _SmallStat({required this.label, required this.value, required this.unit, this.color, this.labelColor});
+  const _SmallStat(
+      {required this.label,
+      required this.value,
+      required this.unit,
+      this.color,
+      this.labelColor});
 
   @override
   Widget build(BuildContext context) {
@@ -668,15 +634,26 @@ class _SmallStat extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: TextStyle(color: labelColor ?? const Color(0xFF6B7280), letterSpacing: 1, fontSize: 10)),
+          Text(label,
+              style: TextStyle(
+                  color: labelColor ?? const Color(0xFF6B7280),
+                  letterSpacing: 1,
+                  fontSize: 10)),
           const SizedBox(height: 2),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
             children: [
-              Text(value, style: TextStyle(fontSize: 26, fontWeight: FontWeight.w300, color: c, height: 1.0)),
+              Text(value,
+                  style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w300,
+                      color: c,
+                      height: 1.0)),
               const SizedBox(width: 4),
-              Text(unit, style: TextStyle(fontSize: 12, color: c.withOpacity(0.7))),
+              Text(unit,
+                  style: TextStyle(
+                      fontSize: 12, color: c.withOpacity(0.7))),
             ],
           ),
         ],

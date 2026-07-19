@@ -10,12 +10,13 @@ import '../appliances/classifier.dart';
 import '../appliances/load_calculator.dart';
 import '../config/app_config.dart';
 import '../energy_counter.dart';
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 
 class WebServer {
   static const int port = 8080;
 
-  final VictronScanner scanner;
+  final JbdBmsScanner scanner;
   final EnergyCounter energy;
   final Classifier classifier;
   final AlarmEngine alarms;

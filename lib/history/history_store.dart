@@ -3,6 +3,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 
 class HistoryPoint {
@@ -32,7 +33,7 @@ class HistoryStore {
   Database? _db;
   Timer? _sampleTimer;
   Timer? _thinTimer;
-  VictronScanner? _scanner;
+  JbdBmsScanner? _scanner;
   bool _paused = false;
   void pause() => _paused = true;
   void resume() => _paused = false;
@@ -58,7 +59,7 @@ class HistoryStore {
     );
   }
 
-  void attachScanner(VictronScanner scanner) {
+  void attachScanner(JbdBmsScanner scanner) {
     _scanner = scanner;
     _sampleTimer?.cancel();
     _sampleTimer = Timer.periodic(

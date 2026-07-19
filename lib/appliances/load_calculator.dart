@@ -1,4 +1,4 @@
-import '../victron/victron_scanner.dart';
+import '../victron/victron_scanner.dart'; // VictronState
 
 /// Räknar ut ström som faktiskt går till laster, dvs allt utöver det som
 /// solpanelen ger.

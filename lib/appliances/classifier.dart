@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 import 'appliance_store.dart';
 import 'load_calculator.dart';
@@ -64,7 +65,7 @@ class Classifier {
 
   void resume() => _paused = false;
 
-  void attachScanner(VictronScanner scanner) {
+  void attachScanner(JbdBmsScanner scanner) {
     _sub?.cancel();
     _sub = scanner.stream.listen(_onState);
   }

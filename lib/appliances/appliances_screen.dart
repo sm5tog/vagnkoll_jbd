@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 import 'appliance_store.dart';
 import 'classifier.dart';
@@ -15,7 +16,7 @@ typedef PauseResume = void Function();
 
 class AppliancesScreen extends StatefulWidget {
   final ApplianceStore store;
-  final VictronScanner scanner;
+  final JbdBmsScanner scanner;
   final Classifier? classifier;
   final List<PauseResume> pauseHooks;
   final List<PauseResume> resumeHooks;
@@ -214,7 +215,7 @@ class _AppliancesScreenState extends State<AppliancesScreen> {
 
 class _ApplianceFormScreen extends StatefulWidget {
   final Appliance? existing;
-  final VictronScanner scanner;
+  final JbdBmsScanner scanner;
   const _ApplianceFormScreen({required this.existing, required this.scanner});
 
   @override

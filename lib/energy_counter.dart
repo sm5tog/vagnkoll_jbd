@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'jbd/jbd_bms_scanner.dart';
 import 'victron/victron_scanner.dart';
 
 /// Räknar Ah använt och laddat under dagen.
@@ -37,7 +38,7 @@ class EnergyCounter {
     _restore();
   }
 
-  void attachScanner(VictronScanner scanner) {
+  void attachScanner(JbdBmsScanner scanner) {
     _sub?.cancel();
     _sub = scanner.stream.listen(_onState);
     _persistTimer?.cancel();

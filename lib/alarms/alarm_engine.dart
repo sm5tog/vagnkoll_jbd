@@ -3,6 +3,7 @@ import 'dart:async';
 import '../appliances/appliance_store.dart';
 import '../appliances/classifier.dart';
 import '../config/app_config.dart';
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 
 enum AlarmLevel { info, warn, critical, emergency }
@@ -55,7 +56,7 @@ class AlarmEngine {
   VictronState? _lastState;
 
   void attach({
-    required VictronScanner scanner,
+    required JbdBmsScanner scanner,
     required Classifier classifier,
   }) {
     _vSub = scanner.stream.listen((s) {

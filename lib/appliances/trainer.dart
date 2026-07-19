@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../jbd/jbd_bms_scanner.dart';
 import '../victron/victron_scanner.dart';
 import 'load_calculator.dart';
 
@@ -28,7 +29,7 @@ class QuickMeasure {
         averageWatts: _result,
       );
 
-  void start(VictronScanner scanner) {
+  void start(JbdBmsScanner scanner) {
     stop();
     _samples.clear();
     _startedAt = DateTime.now();
