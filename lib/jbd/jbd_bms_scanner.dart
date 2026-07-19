@@ -77,29 +77,11 @@ class JbdBmsScanner {
 
   Future<void> _scan() async {
     if (!_running || _mac == null) return;
-    try { await FlutterBluePlus.stopScan(); } catch (_) {}
-
-    _scanSub = FlutterBluePlus.onScanResults.listen((results) async {
-      for (final r in results) {
-        if (r.device.remoteId.str.toUpperCase() == _mac) {
-          await _scanSub?.cancel();
-          _scanSub = null;
-          try { await FlutterBluePlus.stopScan(); } catch (_) {}
-          await _connect(r.device);
-          return;
-        }
-      }
-    });
-
-    await FlutterBluePlus.startScan(
-      withRemoteIds: [_mac!],
-      timeout: const Duration(seconds: 30),
-    );
-
-    // Om timeout utan fynd: försök igen
-    Future.delayed(const Duration(seconds: 35), () {
-      if (_running && _device == null) _scan();
-    });
+    // JBD BMS annonserar inte aktivt — anslut direkt med känt MAC utan scan
+    _state.lastError = 'Ansluter till BMS…';
+    _stateCtrl.add(_state);
+    final device = BluetoothDevice.fromId(_mac!);
+    await _connect(device);
   }
 
   Future<void> _connect(BluetoothDevice device) async {
@@ -122,23 +104,29 @@ class JbdBmsScanner {
 
     try {
       await device.connect(timeout: const Duration(seconds: 15));
-      await device.requestMtu(128);
+      try { await device.requestMtu(128); } catch (_) {}
+
+      _state.lastError = 'Söker BLE-tjänster…';
+      _stateCtrl.add(_state);
       final services = await device.discoverServices();
 
       BluetoothCharacteristic? ntfChar;
       BluetoothCharacteristic? ctlChar;
 
       for (final s in services) {
-        if (s.serviceUuid == _svcGuid) {
+        final uuid = s.serviceUuid.toString().toLowerCase();
+        if (uuid == _svcGuid.toString().toLowerCase()) {
           for (final c in s.characteristics) {
-            if (c.characteristicUuid == _ntfGuid) ntfChar = c;
-            if (c.characteristicUuid == _ctlGuid) ctlChar = c;
+            final cuuid = c.characteristicUuid.toString().toLowerCase();
+            if (cuuid == _ntfGuid.toString().toLowerCase()) ntfChar = c;
+            if (cuuid == _ctlGuid.toString().toLowerCase()) ctlChar = c;
           }
         }
       }
 
       if (ntfChar == null || ctlChar == null) {
-        _state.lastError = 'JBD-tjänst saknas (UUID FF00/FF01/FF02)';
+        final found = services.map((s) => s.serviceUuid.toString()).join(', ');
+        _state.lastError = 'JBD-tjänst saknas. Hittade: $found';
         _stateCtrl.add(_state);
         await device.disconnect();
         return;
@@ -146,6 +134,8 @@ class JbdBmsScanner {
 
       _ctlChar = ctlChar;
       _rxBuf.clear();
+      _state.lastError = null;
+      _stateCtrl.add(_state);
 
       await ntfChar.setNotifyValue(true);
       _ntfSub = ntfChar.onValueReceived.listen(_onNotify);
