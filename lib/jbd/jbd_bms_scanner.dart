@@ -192,7 +192,7 @@ class JbdBmsScanner {
   void _poll() {
     _ctlChar?.write(
       Uint8List.fromList(_cmdBasicInfo),
-      withoutResponse: false,
+      withoutResponse: true,
     ).then((_) {
       _log('poll() skickad');
     }).catchError((e) {
