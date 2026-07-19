@@ -1,0 +1,328 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.29.0'
+          cache: true
+
+      - name: Cache Gradle-paket (sparar ~3-5 min per bygge)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          # Bara pubspec.yaml påverkar — workflow-ändringar ska inte busta cachen
+          key: gradle-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Cache Android NDK + SDK platforms/build-tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.0.12077973
+            /usr/local/lib/android/sdk/platforms/android-33
+            /usr/local/lib/android/sdk/platforms/android-35
+            /usr/local/lib/android/sdk/build-tools
+            /usr/local/lib/android/sdk/cmake
+          key: android-sdk-v3
+
+      - name: Cache pub-paket
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            pub-${{ runner.os }}-
+
+      - name: Cache Flutter .dart_tool
+        uses: actions/cache@v4
+        with:
+          path: .dart_tool
+          key: darttool-${{ runner.os }}-${{ hashFiles('pubspec.yaml') }}
+          restore-keys: |
+            darttool-${{ runner.os }}-
+
+      # secrets.dart är gitignorerad — använd template med dummy-data så bygget går igenom.
+      # Du fyller i riktiga nycklar lokalt och bygger där om du vill ha en "privat" APK.
+      # Alternativ: lagra nycklar som GitHub Secrets (vi kan lägga till det senare).
+      - name: Create secrets.dart från GitHub Secrets
+        env:
+          SHUNT_KEY: ${{ secrets.SHUNT_KEY }}
+          SOLAR_KEY: ${{ secrets.SOLAR_KEY }}
+        run: |
+          cat > lib/secrets.dart <<EOF
+          class VictronDevice {
+            final String name;
+            final String mac;
+            final String encryptionKey;
+            final String kind;
+            const VictronDevice({
+              required this.name,
+              required this.mac,
+              required this.encryptionKey,
+              required this.kind,
+            });
+          }
+
+          const List<VictronDevice> kVictronDevices = [
+            VictronDevice(
+              name: 'SmartShunt',
+              mac: 'F2:9D:4C:1A:BE:92',
+              encryptionKey: '${SHUNT_KEY}',
+              kind: 'shunt',
+            ),
+            VictronDevice(
+              name: 'SmartSolar MPPT 75/15',
+              mac: 'E6:A0:1C:8F:B4:C3',
+              encryptionKey: '${SOLAR_KEY}',
+              kind: 'solar',
+            ),
+          ];
+
+          const double kBatteryCapacityAh = 150.0;
+          const String kBatteryType = 'LiFePO4';
+          const double kSolarPanelMaxW = 160.0;
+          const double kSocWarn = 30.0;
+          const double kSocCritical = 20.0;
+          const double kSocEmergency = 15.0;
+          const double kInverterIdleAmps = 0.5;
+
+          const double kHighLoadWattsThreshold = 72.0;
+          const int kHighLoadMinutes = 10;
+          EOF
+
+      # Flutter create fyller på platform-mappar (android/, ios/) som inte är i repot
+      - name: Generate platform files
+        run: flutter create --platforms=android --project-name=vagnkoll .
+
+      - name: Patcha Kotlin- och NDK-version i auto-genererade Gradle-filer
+        run: |
+          # Hitta vilket filformat flutter create genererade (Groovy eller Kotlin DSL)
+          SETTINGS=$(ls android/settings.gradle android/settings.gradle.kts 2>/dev/null | head -1)
+          APPBUILD=$(ls android/app/build.gradle android/app/build.gradle.kts 2>/dev/null | head -1)
+          echo "Settings-fil: $SETTINGS"
+          echo "App build-fil: $APPBUILD"
+
+          echo "--- INNAN patch: $SETTINGS ---"
+          cat "$SETTINGS"
+          echo "---"
+
+          # Bumpa Kotlin Gradle plugin till 2.1.0 — matcha hela raden som innehåller
+          # both "kotlin.android" och version "X.Y.Z"
+          python3 -c "
+          import re, sys
+          p = '$SETTINGS'
+          s = open(p).read()
+          new = re.sub(r'(kotlin\.android.*?version )\"[\d.]+\"', r'\1\"2.1.0\"', s)
+          open(p, 'w').write(new)
+          "
+          # Hängsel & livrem: misslyckas bygget direkt om versionen inte ändrades
+          if ! grep -q '2.1.0' "$SETTINGS"; then
+            echo "FEL: Kunde inte patcha Kotlin-versionen i $SETTINGS"
+            exit 1
+          fi
+
+          # Välj syntax: Kotlin DSL kräver "=", Groovy gör inte
+          if [[ "$APPBUILD" == *.kts ]]; then
+            NDK_LINE='ndkVersion = "27.0.12077973"'
+          else
+            NDK_LINE='ndkVersion "27.0.12077973"'
+          fi
+          if grep -q 'ndkVersion' "$APPBUILD"; then
+            # Ersätt hela raden som innehåller ndkVersion
+            sed -i "s|.*ndkVersion.*|    $NDK_LINE|" "$APPBUILD"
+          else
+            sed -i "/^android {/a\    $NDK_LINE" "$APPBUILD"
+          fi
+
+          echo "--- $SETTINGS ---"
+          cat "$SETTINGS"
+          echo "--- $APPBUILD ---"
+          cat "$APPBUILD"
+
+      - name: Generera build_info.dart
+        run: |
+          # Tidsstämpel i Europe/Stockholm-tid (HHMM)
+          TS=$(TZ='Europe/Stockholm' date +"%H%M")
+          BUILD_ID="${TS}-${GITHUB_RUN_NUMBER}-$(git rev-parse --short HEAD)"
+          BUILD_TIME=$(TZ='Europe/Stockholm' date +"%Y-%m-%d %H:%M")
+          cat > lib/build_info.dart <<EOF
+          const String kBuildId = '${BUILD_ID}';
+          const String kBuildTime = '${BUILD_TIME}';
+          EOF
+          echo "Build ID: ${BUILD_ID}"
+          echo "BUILD_ID=${BUILD_ID}" >> $GITHUB_ENV
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Konfigurera release-signering (om secrets finns)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "Ingen KEYSTORE_BASE64 — bygger med debug-signering (varje APK får ny signatur)"
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > android/app/vagnkoll-release.jks
+          cat > android/key.properties <<EOF
+          storeFile=vagnkoll-release.jks
+          storePassword=${KEYSTORE_PASSWORD}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PASSWORD}
+          EOF
+
+          # Snabb-verifiera att lösenordet funkar innan vi spenderar 5 min på build
+          echo "Verifierar keystore..."
+          if ! keytool -list -keystore android/app/vagnkoll-release.jks \
+                -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null 2>&1; then
+            echo "FEL: KEYSTORE_PASSWORD eller KEY_ALIAS är fel"
+            exit 1
+          fi
+          echo "Keystore verifierat OK"
+          # Patcha app/build.gradle.kts för att läsa key.properties
+          APPBUILD=$(ls android/app/build.gradle android/app/build.gradle.kts 2>/dev/null | head -1)
+          python3 <<PY
+          import re, sys
+          p = "$APPBUILD"
+          s = open(p).read()
+          is_kts = p.endswith(".kts")
+
+          if "keystoreProperties" in s:
+              print("Redan patchad — skippar")
+              sys.exit(0)
+
+          if is_kts:
+              top = '''import java.util.Properties
+          import java.io.FileInputStream
+
+          val keystoreProperties = Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+              signing_block = '''
+              signingConfigs {
+                  create("release") {
+                      if (keystoreProperties.containsKey("storeFile")) {
+                          storeFile = file(keystoreProperties["storeFile"] as String)
+                          storePassword = keystoreProperties["storePassword"] as String
+                          keyAlias = keystoreProperties["keyAlias"] as String
+                          keyPassword = keystoreProperties["keyPassword"] as String
+                      }
+                  }
+              }
+          '''
+              s = top + s
+              # Lägg signingConfigs-block precis efter "android {"
+              s2 = re.sub(r'(android \{)', r'\1' + signing_block, s, count=1)
+              # Byt ut debug-signering mot release-signering i release-buildtypen
+              s3 = re.sub(
+                  r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+                  'signingConfig = signingConfigs.getByName("release")',
+                  s2
+              )
+              if s2 == s3:
+                  print("VARNING: hittade ingen debug-signingConfig att ersätta")
+                  print(s2)
+                  sys.exit(1)
+              open(p, "w").write(s3)
+              print("Patchade Kotlin DSL för release-signering")
+          else:
+              top = '''def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file('key.properties')
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+
+          '''
+              signing_block = '''
+              signingConfigs {
+                  release {
+                      if (keystoreProperties['storeFile']) {
+                          storeFile file(keystoreProperties['storeFile'])
+                          storePassword keystoreProperties['storePassword']
+                          keyAlias keystoreProperties['keyAlias']
+                          keyPassword keystoreProperties['keyPassword']
+                      }
+                  }
+              }
+          '''
+              s = top + s
+              s2 = re.sub(r'(android \{)', r'\1' + signing_block, s, count=1)
+              s3 = re.sub(
+                  r'signingConfig\s+signingConfigs\.debug',
+                  'signingConfig signingConfigs.release',
+                  s2
+              )
+              if s2 == s3:
+                  print("VARNING: hittade ingen debug-signingConfig att ersätta")
+                  print(s2)
+                  sys.exit(1)
+              open(p, "w").write(s3)
+              print("Patchade Groovy för release-signering")
+          PY
+          echo "--- Patchad $APPBUILD ---"
+          cat "$APPBUILD"
+
+      - name: Build APK
+        run: flutter build apk --release --split-per-abi
+
+      - name: Verifiera APK-signatur (arm64-versionen)
+        run: |
+          APK=build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+          ls -la build/app/outputs/flutter-apk/
+          BUILD_TOOLS=$(ls -d $ANDROID_SDK_ROOT/build-tools/*/ 2>/dev/null | sort -V | tail -1)
+          APKSIGNER="${BUILD_TOOLS}apksigner"
+          echo "Använder $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK" | head -5 || echo "Verify misslyckades"
+
+      - name: Döp om arm64-APK med build-ID
+        run: |
+          # Honor 9 är arm64 — använd den. Övriga splittar slängs.
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+             build/app/outputs/flutter-apk/vagnkoll-${BUILD_ID}.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vagnkoll-${{ env.BUILD_ID }}
+          path: build/app/outputs/flutter-apk/vagnkoll-${{ env.BUILD_ID }}.apk
+          retention-days: 30
+
+      - name: Publicera som GitHub Release (latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="build/app/outputs/flutter-apk/vagnkoll-${BUILD_ID}.apk"
+          BUILD_TIME=$(TZ='Europe/Stockholm' date +"%Y-%m-%d %H:%M")
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest \
+            --title "Vagnkoll" \
+            --notes "Byggd ${BUILD_TIME}. Version: ${BUILD_ID}" \
+            "$APK"
