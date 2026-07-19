@@ -26,6 +26,7 @@ class JbdBmsScanner {
   static const _cmdBasicInfo = [0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77];
 
   final _stateCtrl = StreamController<VictronState>.broadcast();
+  final _logCtrl   = StreamController<String>.broadcast();
   final _state = VictronState();
 
   String? _mac;
@@ -39,11 +40,24 @@ class JbdBmsScanner {
   final List<int> _rxBuf = [];
 
   Stream<VictronState> get stream => _stateCtrl.stream;
+  Stream<String> get logStream => _logCtrl.stream;
   VictronState get current => _state;
+
+  void _log(String msg) {
+    final ts = DateTime.now().toString().substring(11, 19);
+    _logCtrl.add('[$ts] $msg');
+  }
+
+  void _status(String msg) {
+    _log(msg);
+    _state.lastError = msg;
+    _stateCtrl.add(_state);
+  }
 
   Future<void> updateDevices(List<JbdDeviceConfig> devices) async {
     final mac = devices.isNotEmpty ? devices.first.mac.toUpperCase() : null;
     if (mac == _mac) return;
+    _log('updateDevices: MAC ändrat ${_mac ?? "null"} → ${mac ?? "null"}');
     _mac = mac;
     if (_running) {
       await stop();
@@ -53,12 +67,14 @@ class JbdBmsScanner {
   }
 
   Future<void> start() async {
-    if (_mac == null) return;
+    if (_mac == null) { _log('start() avbrutet: ingen MAC'); return; }
+    _log('start() MAC=$_mac');
     _running = true;
     await _scan();
   }
 
   Future<void> stop() async {
+    _log('stop()');
     _running = false;
     _pollTimer?.cancel();
     _pollTimer = null;
@@ -77,9 +93,7 @@ class JbdBmsScanner {
 
   Future<void> _scan() async {
     if (!_running || _mac == null) return;
-    // JBD BMS annonserar inte aktivt — anslut direkt med känt MAC utan scan
-    _state.lastError = 'Ansluter till BMS…';
-    _stateCtrl.add(_state);
+    _status('Ansluter till $_mac…');
     final device = BluetoothDevice.fromId(_mac!);
     await _connect(device);
   }
@@ -88,63 +102,84 @@ class JbdBmsScanner {
     if (!_running) return;
     _device = device;
 
-    _connSub = device.connectionState.listen((s) {
-      if (s == BluetoothConnectionState.disconnected && _running) {
-        _pollTimer?.cancel();
-        _pollTimer = null;
-        _ntfSub?.cancel();
-        _ntfSub = null;
-        _ctlChar = null;
-        _device = null;
-        Future.delayed(const Duration(seconds: 5), () {
-          if (_running) _scan();
-        });
-      }
-    });
-
     try {
+      _log('connect() anropas (timeout 15s)…');
       await device.connect(timeout: const Duration(seconds: 15));
-      try { await device.requestMtu(128); } catch (_) {}
+      _log('connect() lyckades');
 
-      _state.lastError = 'Söker BLE-tjänster…';
-      _stateCtrl.add(_state);
+      // Sätt upp disconnect-lyssnare EFTER lyckad anslutning
+      _connSub = device.connectionState.listen((s) {
+        _log('connectionState: $s');
+        if (s == BluetoothConnectionState.disconnected && _running) {
+          _pollTimer?.cancel();
+          _pollTimer = null;
+          _ntfSub?.cancel();
+          _ntfSub = null;
+          _ctlChar = null;
+          _device = null;
+          _status('Frånkopplad. Försöker igen om 5s…');
+          Future.delayed(const Duration(seconds: 5), () {
+            if (_running) _scan();
+          });
+        }
+      });
+
+      try {
+        await device.requestMtu(128);
+        _log('MTU 128 OK');
+      } catch (e) {
+        _log('MTU-fel (ignoreras): $e');
+      }
+
+      _status('Söker BLE-tjänster…');
       final services = await device.discoverServices();
+      _log('discoverServices: ${services.length} tjänster');
+      for (final s in services) {
+        _log('  tjänst: ${s.serviceUuid}');
+      }
 
       BluetoothCharacteristic? ntfChar;
       BluetoothCharacteristic? ctlChar;
 
+      final svcTarget = _svcGuid.toString().toLowerCase();
+      final ntfTarget = _ntfGuid.toString().toLowerCase();
+      final ctlTarget = _ctlGuid.toString().toLowerCase();
+
       for (final s in services) {
         final uuid = s.serviceUuid.toString().toLowerCase();
-        if (uuid == _svcGuid.toString().toLowerCase()) {
+        if (uuid == svcTarget) {
+          _log('JBD-tjänst hittad! Söker characteristics…');
           for (final c in s.characteristics) {
             final cuuid = c.characteristicUuid.toString().toLowerCase();
-            if (cuuid == _ntfGuid.toString().toLowerCase()) ntfChar = c;
-            if (cuuid == _ctlGuid.toString().toLowerCase()) ctlChar = c;
+            _log('  char: $cuuid');
+            if (cuuid == ntfTarget) ntfChar = c;
+            if (cuuid == ctlTarget) ctlChar = c;
           }
         }
       }
 
       if (ntfChar == null || ctlChar == null) {
         final found = services.map((s) => s.serviceUuid.toString()).join(', ');
-        _state.lastError = 'JBD-tjänst saknas. Hittade: $found';
-        _stateCtrl.add(_state);
+        _status('FF00-tjänst saknas. Hittade: $found');
         await device.disconnect();
         return;
       }
 
+      _log('ntfChar och ctlChar hittade. Aktiverar notify…');
       _ctlChar = ctlChar;
       _rxBuf.clear();
-      _state.lastError = null;
-      _stateCtrl.add(_state);
 
       await ntfChar.setNotifyValue(true);
+      _log('setNotifyValue(true) OK');
       _ntfSub = ntfChar.onValueReceived.listen(_onNotify);
 
+      _log('Startar polling (var 2s)');
+      _state.lastError = null;
+      _stateCtrl.add(_state);
       _poll();
       _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
     } catch (e) {
-      _state.lastError = 'Anslutningsfel: $e';
-      _stateCtrl.add(_state);
+      _status('Anslutningsfel: $e');
       _device = null;
       if (_running) {
         Future.delayed(const Duration(seconds: 10), () {
@@ -158,10 +193,15 @@ class JbdBmsScanner {
     _ctlChar?.write(
       Uint8List.fromList(_cmdBasicInfo),
       withoutResponse: false,
-    ).catchError((_) {});
+    ).then((_) {
+      _log('poll() skickad');
+    }).catchError((e) {
+      _log('poll() fel: $e');
+    });
   }
 
   void _onNotify(List<int> bytes) {
+    _log('notify: ${bytes.length} bytes: ${bytes.map((b) => b.toRadixString(16).padLeft(2, "0")).join(" ")}');
     _rxBuf.addAll(bytes);
     _tryParse();
   }
@@ -185,6 +225,7 @@ class JbdBmsScanner {
 
       final reg = frame[1];
       final data = frame.sublist(4, 4 + len);
+      _log('frame reg=0x${reg.toRadixString(16)} len=$len');
       if (reg == 0x03) _parseBasicInfo(data);
     }
   }
@@ -205,6 +246,7 @@ class JbdBmsScanner {
       temp1 = (bd.getUint16(23, Endian.big) - 2731) / 10.0;
     }
 
+    _log('parseBasicInfo: ${voltage.toStringAsFixed(2)}V ${current.toStringAsFixed(2)}A SoC=${soc.toStringAsFixed(0)}% temp=${temp1?.toStringAsFixed(1) ?? "?"}°C');
     _state.shunt = ShuntReading(
       batteryVoltage: voltage,
       current: current,
@@ -220,6 +262,7 @@ class JbdBmsScanner {
 
   void dispose() {
     _stateCtrl.close();
+    _logCtrl.close();
     stop();
   }
 }

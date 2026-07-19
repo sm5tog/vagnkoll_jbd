@@ -79,10 +79,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   StreamSubscription<ClassificationResult>? _classSub;
   StreamSubscription<List<Alarm>>? _alarmSub;
   StreamSubscription? _applianceChangesSub;
+  StreamSubscription<String>? _logSub;
   Timer? _telemetryTimer;
   VictronState? _state;
   ClassificationResult? _classification;
   List<Alarm> _activeAlarms = [];
+  final List<String> _debugLog = [];
   String _status = 'Startar…';
 
   @override
@@ -146,7 +148,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _sub = _scanner.stream.listen((s) {
       setState(() {
         _state = s;
-        _status = '';
+        if (s.shunt != null) {
+          _status = '';
+        } else {
+          _status = s.lastError ?? 'Ansluter till JBD BMS…';
+        }
+      });
+    });
+    _logSub = _scanner.logStream.listen((msg) {
+      if (mounted) setState(() {
+        _debugLog.insert(0, msg);
+        if (_debugLog.length > 50) _debugLog.removeLast();
       });
     });
     _energySub = _energy.stream.listen((_) {
@@ -188,6 +200,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _classSub?.cancel();
     _alarmSub?.cancel();
     _applianceChangesSub?.cancel();
+    _logSub?.cancel();
     _telemetryTimer?.cancel();
     _webServer?.stop();
     VagnkollForegroundService.stop();
@@ -383,16 +396,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ),
       );
     }
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const CircularProgressIndicator(color: Color(0xFF4ADE80)),
+    return Column(
+      children: [
+        const SizedBox(height: 40),
+        const CircularProgressIndicator(color: Color(0xFF4ADE80)),
+        const SizedBox(height: 24),
+        Text(_status,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 16)),
+        if (_debugLog.isNotEmpty) ...[
           const SizedBox(height: 24),
-          Text(_status,
-              style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 16)),
-        ],
-      ),
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF111827),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ListView.builder(
+                itemCount: _debugLog.length,
+                itemBuilder: (_, i) => Text(
+                  _debugLog[i],
+                  style: const TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 11,
+                    fontFamily: 'monospace',
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ] else
+          const Spacer(),
+      ],
     );
   }
 
