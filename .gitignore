@@ -28,3 +28,4 @@ Thumbs.db
 
 # Secrets (krypteringsnycklar)
 lib/secrets.dart
+CLAUDE.md
